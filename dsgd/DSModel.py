@@ -1,6 +1,5 @@
 import torch
-# import dill
-import pickle
+import dill
 from torch import nn
 from torch.autograd import Variable
 import numpy as np
@@ -30,20 +29,23 @@ class DSModel(nn.Module):
         if use_softmax:
             self.sm = Softmax(dim=0)
 
-    def add_rule(self, pred, ma=None, mb=None, mab=None):
+    def add_rule(self, pred, m_sing=None, m_uncert=None):
         """
         Adds a rule to the model. If no masses are provided, random masses will be used.
+        :param model: The model to be analyzed
         :param pred: DSRule or lambda or callable, used as the predicate of the rule
-        :param ma: [optional] mass for first element
-        :param mb: [optional] mass for second element
-        :param mab: [optional] mass for uncertainty
+        :param m_sing: [optional] masses for singletons
+        :param m_uncert: [optional] mass for uncertainty
         :return:
         """
         self.preds.append(pred)
         self.n += 1
-        if ma is None or mb is None or mab is None:
-            _, ma, mb, mab = create_random_maf()
-        self.masses.append(Variable(torch.Tensor([[ma], [mb], [mab]]), requires_grad=True))
+        if m_sing is None or m_uncert is None or len(m_sing) != 2:
+            masses = create_random_maf(uncertainty=0.8)
+        else:
+            masses = [*m_sing, m_uncert]
+        m = torch.tensor(masses, requires_grad=True, dtype=torch.float)
+        self.masses.append(m)
 
     def forward(self, X):
         """
@@ -65,21 +67,18 @@ class DSModel(nn.Module):
                 else:
                     res = (mf[:2] / torch.sum(mf[:2])).view(2)
                 out.append(res)
+
         return torch.cat(out).view(len(X), 2)
 
     def normalize(self):
         """
         Normalize all masses in order to keep constraints of DS
         """
-        for mass in self.masses:
-            mass.data.clamp_(0., 1.)
-            if self.use_softmax:
-                mass = self.sm(mass)
-            else:
-                mass.data.div_(torch.sum(mass.data))
+        for i in range(len(self.masses)):
+            self.masses[i] = self.sm(self.masses[i])
 
     def _select_rules(self, x):
-        x = x.data.numpy()
+        x = x.data
         sel = []
         for i in range(self.n):
             if self.preds[i](x):
@@ -98,40 +97,49 @@ class DSModel(nn.Module):
             builder += "\nRule %d: %s\n\t A: %.3f\t B: %.3f\tA,B: %.3f\n" % (i+1, ps, ms[0], ms[1], ms[2])
         return builder[:-1]
 
-    def find_most_important_rules(self, classes=None, threshold=0.2, class_names=None):
+    def find_most_important_rules(self, classes=None, threshold=0.2):
         """
         Shows the most contributive rules for the classes specified
+        :param model: The model to be analyzed
         :param classes: Array of classes, by default shows all clases
         :param threshold: score minimum value considered to be contributive
-        :return: A string containing the information about most important rules
+        :return: A list containing the information about most important rules
         """
-        builder = "Most important rules\n"
         if classes is None:
             classes = [0, 1]
 
-        if class_names is None:
-            class_names = [str(i) for i in range(2)]
+        with torch.no_grad():
+            rules = {}
+            for j in range(len(classes)):
+                cls = classes[j]
+                found = []
+                for i in range(len(self.masses)):
+                    ms = self.masses[i]
+                    score = ((.1 + ms[cls]) / (.1 + ms[1 - cls]) - 1) * (1 - ms[-1]) / 10.
+                    if score >= threshold * threshold:
+                        ps = self.preds[i]
+                        found.append((score, i, ps, str(ps), np.sqrt(score), ms))
 
-        for cls in classes:
-            builder += "\n For class %s\n" % class_names[cls]
-            found = []
-            for i in range(len(self.masses)):
-                ms = self.masses[i]
-                score = ((.1 + ms[cls]) / (.1 + ms[1 - cls]) - 1) * (1 - ms[-1]) / 10.
-                if score >= threshold * threshold:
-                    ps = str(self.preds[i])
-                    found.append((score, "  Rule %d: %s (%.3f)\n\t A: %.3f\t B: %.3f\tA,B: %.3f\n" % \
-                                (i + 1, ps, np.sqrt(score.detach().numpy()), ms[0], ms[1], ms[2])))
+                found.sort(reverse=True)
+                rules[cls] = found
 
-            found.sort(reverse=True)
-            if len(found) == 0:
-                builder += "   No rules found\n"
+        return rules
+    
+    def find_rules_importance(self):
+        """
+        Shows the importance of each rule in the model
+        :param model: The model to be analyzed
+        :return: A list containing the importance values of each rule of each class
+        """
+        
+        rules = self.find_most_important_rules(threshold=0)
+        arr_importance = []
+        for label, value in rules.items():
+            for index in range(len(value)):
+                arr_importance.append(value[index][4])
 
-            for rule in found:
-                builder += rule[1]
-
-        return builder[:-1]
-
+        return arr_importance
+    
     def generate_statistic_single_rules(self, X, breaks=2, column_names=None):
         """
         Populates the model with attribute-independant rules based on statistical breaks.
@@ -293,21 +301,21 @@ class DSModel(nn.Module):
         Loads rules from a file, it deletes previous rules
         :param filename: The name of the input file
         """
-        with open(filename) as f:
-            sv = pickle.load(f)
+        with open(filename, "rb") as f:
+            sv = dill.load(f)
             self.preds = sv["preds"]
             self.masses = sv["masses"]
-
-        print(self.preds)
+            self.n = sv["n"]
 
     def save_rules_bin(self, filename):
         """
         Saves the current rules into a file
         :param filename: The name of the file
         """
-        with open(filename, "w") as f:
-            sv = {"preds": self.preds, "masses": self.masses}
-            pickle.dump(sv, f, pickle.HIGHEST_PROTOCOL)
+        sv = {"preds": self.preds, "masses": self.masses, "n": self.n}
+        
+        with open(filename, "wb") as f:
+            dill.dump(sv, f, dill.HIGHEST_PROTOCOL)
 
     def get_rules_size(self):
         return self.n

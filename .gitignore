@@ -7,3 +7,6 @@ credentials.json
 *.bin
 *.df.gzip
 ds
+
+/build
+/dsgd.egg-info

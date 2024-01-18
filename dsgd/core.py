@@ -112,7 +112,7 @@ def create_random_maf(uncertainty=0.8):
     :return: mass assignment function vector
     """
     a = random.random() * (1 - uncertainty)
-    return 0, a, 1 - a - uncertainty, uncertainty
+    return a, 1 - a - uncertainty, uncertainty
 
 
 def create_random_maf_k(k, uncertainty=0.5):
@@ -223,7 +223,7 @@ def dempster_rule_t(m1, m2, normalize=True):
         mf_stroke = m1[2] * m2[1] + m1[1] * m2[2] + m1[1] * m2[1]
         mf_either = m1[2] * m2[2]
 
-    return torch.cat([mf_no_stroke, mf_stroke, mf_either])
+    return torch.cat([mf_no_stroke.reshape(1), mf_stroke.reshape(1), mf_either.reshape(1)])
 
 
 def dempster_rule_kt(m1, m2, normalize=False):
